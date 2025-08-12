@@ -34,7 +34,7 @@
 14:     ST        4,0(3)        call: push DL (FP)
 15:     LDA       3,-1(3)       call: sp--
 16:     LDA       4,1(3)        call: FP=SP+1
-17:     LDA       7,0(7)        call: salto a funcion duplicar
+17:     LDA       7,1(7)        call: salto a funcion duplicar
 * <- llamada funcion
 18:     ST        0,4(5)        asignacion: global resultado
 * <- asignacion

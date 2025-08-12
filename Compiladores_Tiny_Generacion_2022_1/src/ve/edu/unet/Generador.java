@@ -457,7 +457,7 @@ public class Generador {
 		// Compilación diferida: emitir función si es la primera vez
 		Integer inicio = inicioFuncion.get(n.getNombreFuncion());
 		if (inicio == null) {
-			int posLlamada = UtGen.emitirSalto(1);
+			int posLlamada = UtGen.emitirSalto(2);
 			UtGen.restaurarRespaldo();
 			inicio = UtGen.emitirSalto(0);
 			inicioFuncion.put(n.getNombreFuncion(), inicio);
@@ -483,6 +483,8 @@ public class Generador {
 			// Parchar llamada
 			UtGen.cargarRespaldo(posLlamada);
 			UtGen.emitirRM_Abs("LDA", UtGen.PC, inicio, "call: salto a funcion " + n.getNombreFuncion());
+			// Completar la segunda ranura de salto (NOP via LDA PC,0)
+			UtGen.emitirRM("LDA", UtGen.PC, 0, UtGen.PC, "call: nop de relleno");
 			UtGen.restaurarRespaldo();
 		} else {
 			UtGen.emitirRM_Abs("LDA", UtGen.PC, inicio, "call: salto a funcion " + n.getNombreFuncion());

@@ -9,6 +9,7 @@ cd "$SCRIPT_DIR"
 # Crear directorios de salida si no existen
 mkdir -p salida
 mkdir -p ejemplo_generado
+mkdir -p out
 
 # Detectar el separador de classpath según el OS
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
@@ -16,6 +17,13 @@ if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; t
 else
     CLASSPATH_SEP=":"
 fi
+
+# Compilar fuentes Java a 'out'
+echo "Compilando fuentes Java..."
+javac -cp "src${CLASSPATH_SEP}lib/java-cup-11b-runtime.jar" -d out \
+  src/ve/edu/unet/nodosAST/*.java src/ve/edu/unet/*.java || { echo "Fallo la compilacion de Java"; exit 1; }
+
+echo "Compilacion Java completa."
 
 # Contador para estadísticas
 total_archivos=0
@@ -45,7 +53,7 @@ for archivo_tiny in ejemplo_fuente/*.tiny; do
     echo "  → Código generado: $archivo_tm"
     
     # Compilar el archivo
-    java -cp "src${CLASSPATH_SEP}lib/java-cup-11b-runtime.jar" ve.edu.unet.parser "$archivo_tiny" > "$archivo_log" 2>&1
+    java -cp "out${CLASSPATH_SEP}lib/java-cup-11b-runtime.jar" ve.edu.unet.parser "$archivo_tiny" > "$archivo_log" 2>&1
     
     # Verificar si la compilación fue exitosa
     if [[ $? -eq 0 ]]; then
@@ -72,7 +80,7 @@ echo "=== Resumen de Compilación ==="
 echo "Total de archivos procesados: $total_archivos"
 echo "Compilaciones exitosas: $compilados_exitosos"
 echo "Compilaciones fallidas: $compilados_fallidos"
-echo ""
+echo "" 
 
 
 

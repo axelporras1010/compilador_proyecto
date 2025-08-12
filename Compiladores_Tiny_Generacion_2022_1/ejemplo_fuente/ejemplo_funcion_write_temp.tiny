@@ -1,0 +1,17 @@
+{Ejemplo simple de funciones}
+
+global x;
+
+function duplicar(num)
+begin
+    var temp;
+    temp := num * 2;
+    write temp;
+end
+
+begin
+    var resultado;
+    x := 5;
+    resultado := call duplicar(x);
+    write x {Debe mostrar 5 porque no se modificó en la función}
+end

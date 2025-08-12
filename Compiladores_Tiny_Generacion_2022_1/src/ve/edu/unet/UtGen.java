@@ -35,6 +35,12 @@ public class UtGen {
 	 */
 	public static int  GP=5;
 
+	/* sp = "stack pointer" (registro[3]) para pila de activacion de funciones */
+	public static int  SP=3;
+
+	/* fp = "frame pointer" (registro[4]) base del marco de activacion actual */
+	public static int  FP=4;
+
 	/* Defino al registro[0] como el acumulador 1 */
 	public static int  AC=0;
 

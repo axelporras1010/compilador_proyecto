@@ -15,7 +15,7 @@ public class Generador {
 	 * |t1	|<- desplazamientoTmp (tope actual)
 	 * |free|
 	 * |free|
-	 * |...	|
+	 * |... |
 	 * |x	|
 	 * |y	|<- gp
 	 * 
@@ -45,10 +45,23 @@ public class Generador {
 	private static java.util.Stack<Integer> pilaBreak = new java.util.Stack<Integer>();
 	private static java.util.Stack<Integer> pilaContinue = new java.util.Stack<Integer>();
 
-    // Compilación diferida de funciones
-    private static final Map<String, NodoFuncion> funcionesRegistradas = new HashMap<>();
-    private static final Map<String, Integer> inicioFuncion = new HashMap<>();
-    private static final Set<String> funcionesEmitidas = new HashSet<>();
+	// Compilación diferida de funciones
+	private static final Map<String, NodoFuncion> funcionesRegistradas = new HashMap<>();
+	private static final Map<String, Integer> inicioFuncion = new HashMap<>();
+	private static final Set<String> funcionesEmitidas = new HashSet<>();
+
+	// Layout de activación por función
+	private static final Map<String, FunctionLayout> layoutsFuncion = new HashMap<>();
+	private static String funcionActual = null;
+
+	private static class FunctionLayout {
+		Map<String, Integer> offsetParametros = new HashMap<>(); // desde FP (>= 2)
+		Map<String, Integer> offsetLocales = new HashMap<>();    // offsets negativos (< 0)
+		Map<String, Integer> tamanioLocalArray = new HashMap<>();
+		Set<String> parametrosArray = new java.util.HashSet<>();
+		int numParametros = 0;
+		int slotsLocales = 0; // cantidad total de slots para locales (incluye arrays)
+	}
 	
 	public static void setTablaSimbolos(TablaSimbolos tabla){
 		tablaSimbolos = tabla;
@@ -152,6 +165,8 @@ public class Generador {
 		// Registrar funciones (sin generar su cuerpo)
 		if(n.getFunction_block() != null){
 			generar(n.getFunction_block());
+			// Emitir todas las funciones ahora, en el orden declarado
+			emitirFuncionesEnOrden(n.getFunction_block());
 		}
 		
 		// Generar programa principal
@@ -166,87 +181,154 @@ public class Generador {
 		NodoDeclaracion n = (NodoDeclaracion)nodo;
 		if(UtGen.debug) UtGen.emitirComentario("-> declaracion: " + n.getNombreVariable());
 		
+		// Si es local, inicializamos a 0 en el frame activo
+		if(!n.isEsGlobal() && funcionActual != null){
+			FunctionLayout fl = layoutsFuncion.get(funcionActual);
+			if (fl != null) {
+				Integer offLocal = fl.offsetLocales.get(n.getNombreVariable());
+				Integer offParam = fl.offsetParametros.get(n.getNombreVariable());
+				if(offLocal != null){
+					if(n.isEsArray()){
+						int tam = fl.tamanioLocalArray.getOrDefault(n.getNombreVariable(), 0);
+						// Inicializar array local a 0
+						for(int i=0;i<tam;i++){
+							UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "local array: init 0");
+							UtGen.emitirRM("ST", UtGen.AC, offLocal - i, UtGen.FP, "local array: store");
+						}
+					}else{
+						UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "local: init 0");
+						UtGen.emitirRM("ST", UtGen.AC, offLocal, UtGen.FP, "local: store");
+					}
+					if(UtGen.debug) UtGen.emitirComentario("<- declaracion local");
+					return;
+				} else if (offParam != null) {
+					// Los parámetros ya están en el frame; no hacer nada
+					if(UtGen.debug) UtGen.emitirComentario("<- declaracion parametro");
+					return;
+				}
+			}
+		}
+		
+		// Globales
 		// Obtener la dirección asignada por la tabla de símbolos
 		int direccion = tablaSimbolos.getDireccion(n.getNombreVariable());
 		
 		if(n.isEsArray()){
-			// Declaración de array
+			// Declaración de array global
 			UtGen.emitirComentario("Declaracion de array: " + n.getNombreVariable() + 
-							  (n.getTamaño() != null ? " tamaño definido" : " tamaño por parámetro"));
+					      (n.getTamaño() != null ? " tamaño definido" : " tamaño por parámetro"));
 			
 			if(n.getTamaño() != null && n.isEsGlobal()){
-				// Array global con tamaño definido - reservar espacio
-				generar(n.getTamaño());  // Evaluar el tamaño
-				int tamaño = ((NodoValor)n.getTamaño()).getValorEntero(); // Obtener valor constante
-				
-				// Inicializar elementos del array a cero
-				for(int i = 0; i < tamaño; i++){
-					UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "array: inicializar elemento " + i + " a cero");
-					UtGen.emitirRM("ST", UtGen.AC, direccion + i, UtGen.GP, "array: almacenar en posicion " + (direccion + i));
+				// Array global con tamaño definido - reservar espacio (inicializar a 0)
+				NodoBase tb = n.getTamaño();
+				int tam = 0;
+				if (tb instanceof NodoValor) tam = ((NodoValor)tb).getValorEntero();
+				for(int i = 0; i < tam; i++){
+					UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "array: inicializar");
+					UtGen.emitirRM("ST", UtGen.AC, direccion + i, UtGen.GP, "array: pos global");
 				}
 			}
 		} else {
-			// Declaración de variable simple
+			// Declaración de variable simple global
 			UtGen.emitirComentario("Declaracion de variable: " + n.getNombreVariable() + 
-							  (n.isEsGlobal() ? " (global)" : " (local)"));
+					      (n.isEsGlobal() ? " (global)" : " (local)"));
 			
 			if(n.isEsGlobal()){
 				// Variable global - inicializar a cero
 				UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "global: inicializar variable " + n.getNombreVariable() + " a cero");
 				UtGen.emitirRM("ST", UtGen.AC, direccion, UtGen.GP, "global: almacenar en direccion " + direccion);
-			} else {
-				// Variable local - reservar espacio en el frame actual
-				UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "local: inicializar variable " + n.getNombreVariable() + " a cero");
-				UtGen.emitirRM("ST", UtGen.AC, direccion, UtGen.GP, "local: almacenar en direccion " + direccion);
-				// Nota: En una implementación más sofisticada, las variables locales 
-				// deberían usar un frame pointer diferente del GP
 			}
 		}
 		
 		if(UtGen.debug) UtGen.emitirComentario("<- declaracion");
 	}
 
-    // Emite el cuerpo de una función (una sola vez) y registra su inicio
-    private static void emitirFuncionSiNecesaria(String nombreFuncion) {
-        if (funcionesEmitidas.contains(nombreFuncion)) {
-            return;
-        }
-        NodoFuncion n = funcionesRegistradas.get(nombreFuncion);
-        if (n == null) {
-            UtGen.emitirComentario("ERROR: llamada a funcion no definida: " + nombreFuncion);
-            return;
-        }
-
-        int inicio = UtGen.emitirSalto(0); // dirección actual donde comenzará la función
-        inicioFuncion.put(nombreFuncion, inicio);
-        funcionesEmitidas.add(nombreFuncion);
-
-        UtGen.emitirComentario("=== INICIO FUNCION " + n.getNombre() + " ===");
-
-        // Procesamiento de parámetros: pendiente (los argumentos ya se apilaron en la llamada)
-
-        // Generar cuerpo de la función
-        if (n.getCuerpo() != null) {
-            generar(n.getCuerpo());
-        }
-
-        // Return implícito: recuperar dirección de retorno de la pila y saltar
-        UtGen.emitirComentario("Return implicito de funcion");
-        UtGen.emitirRM("LD", UtGen.AC1, ++desplazamientoTmp, UtGen.MP, "funcion: recuperar direccion de retorno");
-        UtGen.emitirRM("LD", UtGen.PC, 0, UtGen.AC1, "funcion: retorno");
-
-        UtGen.emitirComentario("=== FIN FUNCION " + n.getNombre() + " ===");
-    }
-
-    // Registrar función en la primera pasada (sin generar código)
-    private static void registrarFuncion(NodoFuncion funcion) {
-        if (funcion.getNombre() == null) {
-            UtGen.emitirComentario("ADVERTENCIA: funcion sin nombre");
-            return;
-        }
-        funcionesRegistradas.put(funcion.getNombre(), funcion);
-        UtGen.emitirComentario("registrada funcion: " + funcion.getNombre());
-    }
+	// Registrar función en la primera pasada (sin generar código)
+	private static void registrarFuncion(NodoFuncion funcion) {
+		if (funcion.getNombre() == null) {
+			UtGen.emitirComentario("ADVERTENCIA: funcion sin nombre");
+			return;
+		}
+		funcionesRegistradas.put(funcion.getNombre(), funcion);
+		// Precalcular layout de la función
+		FunctionLayout fl = construirLayoutFuncion(funcion);
+		layoutsFuncion.put(funcion.getNombre(), fl);
+		UtGen.emitirComentario("registrada funcion: " + funcion.getNombre());
+	}
+	
+	private static FunctionLayout construirLayoutFuncion(NodoFuncion f){
+		FunctionLayout fl = new FunctionLayout();
+		// Parametros
+		java.util.List<NodoDeclaracion> listaParams = new java.util.ArrayList<>();
+		NodoBase p = f.getParametros();
+		while(p != null){
+			if(p instanceof NodoDeclaracion){
+				listaParams.add((NodoDeclaracion)p);
+			}
+			p = p.getHermanoDerecha();
+		}
+		fl.numParametros = listaParams.size();
+		for (int idx = 0; idx < listaParams.size(); idx++){
+			NodoDeclaracion pd = listaParams.get(idx);
+			int off = 2 + (listaParams.size() - 1 - idx); // ajustar por orden de push izq->der
+			fl.offsetParametros.put(pd.getNombreVariable(), off);
+			if(pd.isEsArray()) fl.parametrosArray.add(pd.getNombreVariable());
+		}
+		// Locales: recorrer cuerpo
+		contarLocales(f.getCuerpo(), fl);
+		return fl;
+	}
+	
+	private static void contarLocales(NodoBase nodo, FunctionLayout fl){
+		if(nodo == null) return;
+		if(nodo instanceof NodoDeclaracion){
+			NodoDeclaracion nd = (NodoDeclaracion)nodo;
+			if(!nd.isEsGlobal()){
+				if(nd.isEsArray()){
+					int tam = 0;
+					if(nd.getTamaño() instanceof NodoValor){
+						tam = ((NodoValor)nd.getTamaño()).getValorEntero();
+					}
+					// reservar bloque contiguo
+					int base = -(fl.slotsLocales + 1);
+					fl.offsetLocales.put(nd.getNombreVariable(), base);
+					fl.tamanioLocalArray.put(nd.getNombreVariable(), tam);
+					fl.slotsLocales += tam;
+				} else {
+					int off = -(fl.slotsLocales + 1);
+					fl.offsetLocales.put(nd.getNombreVariable(), off);
+					fl.slotsLocales += 1;
+				}
+			}
+		}
+		// Recorrer hijos
+		if(nodo instanceof NodoIf){
+			contarLocales(((NodoIf)nodo).getParteThen(), fl);
+			contarLocales(((NodoIf)nodo).getParteElse(), fl);
+			contarLocales(((NodoIf)nodo).getPrueba(), fl);
+		} else if (nodo instanceof NodoRepeat){
+			contarLocales(((NodoRepeat)nodo).getCuerpo(), fl);
+			contarLocales(((NodoRepeat)nodo).getPrueba(), fl);
+		} else if (nodo instanceof NodoFor){
+			NodoFor nf = (NodoFor)nodo;
+			contarLocales(nf.getValorInicial(), fl);
+			contarLocales(nf.getValorFinal(), fl);
+			contarLocales(nf.getIncremento(), fl);
+			contarLocales(nf.getCuerpo(), fl);
+		} else if (nodo instanceof NodoAsignacion){
+			contarLocales(((NodoAsignacion)nodo).getExpresion(), fl);
+			contarLocales(((NodoAsignacion)nodo).getIndice(), fl);
+		} else if (nodo instanceof NodoEscribir){
+			contarLocales(((NodoEscribir)nodo).getExpresion(), fl);
+		} else if (nodo instanceof NodoOperacion){
+			NodoOperacion no = (NodoOperacion)nodo;
+			contarLocales(no.getOpIzquierdo(), fl);
+			contarLocales(no.getOpDerecho(), fl);
+		} else if (nodo instanceof NodoLlamadaFuncion){
+			contarLocales(((NodoLlamadaFuncion)nodo).getArgumentos(), fl);
+		}
+		if(nodo.TieneHermano()) contarLocales(nodo.getHermanoDerecha(), fl);
+	}
 
 	private static void generarFor(NodoBase nodo){
 		NodoFor n = (NodoFor)nodo;
@@ -321,115 +403,87 @@ public class Generador {
 		NodoLlamadaFuncion n = (NodoLlamadaFuncion)nodo;
 		if(UtGen.debug) UtGen.emitirComentario("-> llamada funcion: " + n.getNombreFuncion());
 		
-		// 1) Procesar argumentos si existen (se apilan primero)
-		int numArgs = 0;
+		// Preparar datos de la función
 		NodoFuncion defFuncion = funcionesRegistradas.get(n.getNombreFuncion());
-		java.util.List<NodoDeclaracion> paramsOrden = new java.util.ArrayList<>();
-		if (defFuncion != null && defFuncion.getParametros() != null) {
-			NodoBase p = defFuncion.getParametros();
-			while (p != null) {
-				if (p instanceof NodoDeclaracion) paramsOrden.add((NodoDeclaracion)p);
-				p = p.getHermanoDerecha();
-			}
-		}
-		if(n.getArgumentos() != null){
-			UtGen.emitirComentario("Procesando argumentos de la llamada");
-			NodoBase arg = n.getArgumentos();
-			int idx = 0;
-			while(arg != null){
-				// Si el parametro esperado es array, pasar la base (direccion) del array
-				boolean pasarBaseArray = false;
-				if (idx < paramsOrden.size()) {
-					NodoDeclaracion pd = paramsOrden.get(idx);
-					pasarBaseArray = pd.isEsArray();
+		FunctionLayout fl = layoutsFuncion.get(n.getNombreFuncion());
+		int numArgs = 0;
+		java.util.List<NodoBase> args = new java.util.ArrayList<>();
+		NodoBase argNode = n.getArgumentos();
+		while(argNode != null){ args.add(argNode); argNode = argNode.getHermanoDerecha(); }
+		for(int idx=0; idx<args.size(); idx++){
+			NodoBase arg = args.get(idx);
+			boolean pasarBaseArray = false;
+			if (defFuncion != null){
+				NodoBase p = defFuncion.getParametros();
+				for(int k=0; k<idx && p!=null; k++) p = p.getHermanoDerecha();
+				if(p instanceof NodoDeclaracion){
+					pasarBaseArray = ((NodoDeclaracion)p).isEsArray();
 				}
-				if (pasarBaseArray && arg instanceof NodoIdentificador) {
-					String nombreArg = ((NodoIdentificador)arg).getNombre();
-					int base = tablaSimbolos.getDireccion(nombreArg);
-					UtGen.emitirRM("LDC", UtGen.AC, base, 0, "call: base addr de array " + nombreArg);
+			}
+			if(pasarBaseArray && arg instanceof NodoIdentificador){
+				DireccionArray da = calcularBaseArray(((NodoIdentificador)arg).getNombre());
+				if(da.esGlobal){
+					UtGen.emitirRM("LDC", UtGen.AC, da.baseDireccion, 0, "arg array: base global");
+					UtGen.emitirRO("ADD", UtGen.AC, UtGen.AC, UtGen.GP, "arg array: base absoluta");
 				} else {
-					generar(arg);
+					UtGen.emitirRM("LDA", UtGen.AC, da.offsetFP, UtGen.FP, "arg array: base local/param");
 				}
-				UtGen.emitirRM("ST", UtGen.AC, desplazamientoTmp--, UtGen.MP, "call: guardar argumento");
-				numArgs++;
-				idx++;
-				arg = arg.getHermanoDerecha();
-			}
-		}
-
-		// 2) Calcular y apilar direccion de retorno: AC = PC + 3; push(AC)
-		// i: LDA AC,(PC+3); i+1: ST AC,...; i+2: LDA PC,func -> retornar a i+3
-		UtGen.emitirRM("LDA", UtGen.AC, 3, UtGen.PC, "call: calcular return addr (PC+3)");
-		UtGen.emitirRM("ST", UtGen.AC, desplazamientoTmp--, UtGen.MP, "call: push return addr");
-		
-		// Compilación diferida: emitir la función al final del código la primera vez que se use
-		Integer inicio = inicioFuncion.get(n.getNombreFuncion());
-		if (inicio == null) {
-			// Guardar posicion actual (sitio de llamada) dejando UN hueco para la instruccion de salto
-			int posLlamada = UtGen.emitirSalto(1);
-			// Ir al final del código emitido hasta ahora
-			UtGen.restaurarRespaldo();
-			// Registrar inicio de la funcion
-			inicio = UtGen.emitirSalto(0);
-			inicioFuncion.put(n.getNombreFuncion(), inicio);
-			funcionesEmitidas.add(n.getNombreFuncion());
-			
-			// Emitir prólogo de función: copiar argumentos a parámetros y fijar RA en 0(MP)
-			if (defFuncion != null && !paramsOrden.isEmpty()) {
-				// Mover direccion de retorno a 0(MP)
-				UtGen.emitirRM("LD", UtGen.AC1, -numArgs, UtGen.MP, "prologo: cargar RA de -(numArgs)(MP)");
-				UtGen.emitirRM("ST", UtGen.AC1, 0, UtGen.MP, "prologo: colocar RA en 0(MP)");
-				// Copiar cada argumento a su slot en GP
-				for (int i = 0; i < paramsOrden.size(); i++) {
-					NodoDeclaracion pd = paramsOrden.get(i);
-					int dirParam = tablaSimbolos.getDireccion(pd.getNombreVariable());
-					int off = -i; // primer arg en 0(MP), segundo en -1(MP), etc.
-					UtGen.emitirRM("LD", UtGen.AC, off, UtGen.MP, "prologo: cargar arg " + pd.getNombreVariable());
-					UtGen.emitirRM("ST", UtGen.AC, dirParam, UtGen.GP, "prologo: guardar param " + pd.getNombreVariable());
-				}
-			}
-			// Emitir cuerpo de la función
-			NodoFuncion def = funcionesRegistradas.get(n.getNombreFuncion());
-			if (def == null) {
-				UtGen.emitirComentario("ERROR: llamada a funcion no definida: " + n.getNombreFuncion());
 			} else {
-				UtGen.emitirComentario("=== INICIO FUNCION " + def.getNombre() + " ===");
-				if (def.getCuerpo() != null) {
-					generar(def.getCuerpo());
-				}
-				UtGen.emitirComentario("Return implicito de funcion");
-				UtGen.emitirRM("LD", UtGen.AC1, 0, UtGen.MP, "funcion: recuperar direccion de retorno");
-				UtGen.emitirRM("LDA", UtGen.PC, 0, UtGen.AC1, "funcion: retorno");
-				UtGen.emitirComentario("=== FIN FUNCION " + def.getNombre() + " ===");
+				generar(arg);
 			}
-			// Volver al sitio de llamada y emitir el salto a la función
-			UtGen.cargarRespaldo(posLlamada);
-			UtGen.emitirRM_Abs("LDA", UtGen.PC, inicio, "call: salto a funcion " + n.getNombreFuncion());
-			// Restaurar emision al final para continuar generando el resto del programa
-			UtGen.restaurarRespaldo();
-		} else {
-			// Ya fue emitida antes: emitir solo el salto
-			UtGen.emitirRM_Abs("LDA", UtGen.PC, inicio, "call: salto a funcion " + n.getNombreFuncion());
+			UtGen.emitirRM("ST", UtGen.AC, 0, UtGen.SP, "call: push arg");
+			UtGen.emitirRM("LDA", UtGen.SP, -1, UtGen.SP, "call: sp--");
+			numArgs++;
 		}
 		
-		// 3) Restaurar desplazamiento temporal (limpiar argumentos en el generador)
-		desplazamientoTmp += numArgs;
+		// RA y DL
+		UtGen.emitirRM("LDA", UtGen.AC, 7, UtGen.PC, "call: calcular return addr (PC+7)");
+		UtGen.emitirRM("ST", UtGen.AC, 0, UtGen.SP, "call: push RA");
+		UtGen.emitirRM("LDA", UtGen.SP, -1, UtGen.SP, "call: sp--");
+		UtGen.emitirRM("ST", UtGen.FP, 0, UtGen.SP, "call: push DL (FP)");
+		UtGen.emitirRM("LDA", UtGen.SP, -1, UtGen.SP, "call: sp--");
+		UtGen.emitirRM("LDA", UtGen.FP, 1, UtGen.SP, "call: FP=SP+1");
+		
+		// Asegurar que la funcion fue emitida y tenemos su inicio
+		Integer inicio = inicioFuncion.get(n.getNombreFuncion());
+		if (inicio == null && defFuncion != null){
+			// Emite ahora la función si por algun motivo no fue emitida en programa
+			emitirFuncion(defFuncion);
+			inicio = inicioFuncion.get(n.getNombreFuncion());
+		}
+		if (inicio == null){
+			UtGen.emitirComentario("ERROR: llamada a funcion sin inicio: " + n.getNombreFuncion());
+		} else {
+			UtGen.emitirRM_Abs("LDA", UtGen.PC, inicio, "call: salto a funcion " + n.getNombreFuncion());
+		}
 		
 		if(UtGen.debug) UtGen.emitirComentario("<- llamada funcion");
+	}
+	
+	private static void emitirEpilogoFuncion(String nombreFuncion){
+		FunctionLayout fl = layoutsFuncion.get(nombreFuncion);
+		int p = (fl != null) ? fl.numParametros : 0;
+		// Desalojar locales: SP = FP
+		UtGen.emitirRM("LDA", UtGen.SP, 0, UtGen.FP, "epilogo: SP=FP");
+		// Cargar RA y DL
+		UtGen.emitirRM("LD", UtGen.AC1, 1, UtGen.FP, "epilogo: cargar RA");
+		UtGen.emitirRM("LD", UtGen.FP, 0, UtGen.FP, "epilogo: restaurar FP (DL)");
+		// Desalojar RA+DL+params (ajuste de puntero de pila)
+		UtGen.emitirRM("LDA", UtGen.SP, 2 + p, UtGen.SP, "epilogo: limpiar frame completo");
+		// Saltar a RA
+		UtGen.emitirRM("LDA", UtGen.PC, 0, UtGen.AC1, "funcion: retorno");
 	}
 
 	private static void generarReturn(NodoBase nodo){
 		NodoReturn n = (NodoReturn)nodo;
 		if(UtGen.debug) UtGen.emitirComentario("-> return");
 		
-		// Evaluar expresión de retorno
+		// Evaluar expresión de retorno dejando resultado en AC
 		if(n.getExpresion() != null){
 			generar(n.getExpresion());
 		}
-		
-		// Recuperar direccion de retorno y saltar
-		UtGen.emitirRM("LD", UtGen.AC1, 0, UtGen.MP, "return: recuperar direccion de retorno");
-		UtGen.emitirRM("LDA", UtGen.PC, 0, UtGen.AC1, "return: salto a direccion de retorno");
+		// Epilogo y salto
+		emitirEpilogoFuncion(funcionActual);
 		
 		if(UtGen.debug) UtGen.emitirComentario("<- return");
 	}
@@ -539,19 +593,33 @@ public class Generador {
 			// Asignación a array: arr[indice] = valor
 			UtGen.emitirRM("ST", UtGen.AC, desplazamientoTmp--, UtGen.MP, "asignacion array: guardar valor");
 			
-			// Calcular dirección del array
-			generar(n.getIndice());
-			direccion = tablaSimbolos.getDireccion(n.getIdentificador());
-			UtGen.emitirRM("LDC", UtGen.AC1, direccion, 0, "asignacion array: cargar direccion base");
-			UtGen.emitirRO("ADD", UtGen.AC, UtGen.AC, UtGen.AC1, "asignacion array: calcular direccion");
-			
+			// Calcular base del array y direccion efectiva
+			generar(n.getIndice()); // deja indice en AC
+			String nombre = n.getIdentificador();
+			DireccionArray da = calcularBaseArray(nombre);
+			if(da.esParametroArray){
+				// AC1 = base desde FP+offset
+				UtGen.emitirRM("LD", UtGen.AC1, da.offsetFP, UtGen.FP, "asig arr: cargar base param array");
+				UtGen.emitirRO("ADD", UtGen.AC, UtGen.AC, UtGen.AC1, "asig arr: base+idx");
+			} else if(da.esGlobal){
+				UtGen.emitirRM("LDC", UtGen.AC1, da.baseDireccion, 0, "asig arr: base global");
+				UtGen.emitirRO("ADD", UtGen.AC, UtGen.AC, UtGen.AC1, "asig arr: base+idx");
+			} else {
+				// local array variable: AC1 = FP+offset
+				UtGen.emitirRM("LDA", UtGen.AC1, da.offsetFP, UtGen.FP, "asig arr: base local");
+				UtGen.emitirRO("ADD", UtGen.AC, UtGen.AC, UtGen.AC1, "asig arr: base+idx");
+			}
 			// Cargar valor y almacenar en la dirección calculada
 			UtGen.emitirRM("LD", UtGen.AC1, ++desplazamientoTmp, UtGen.MP, "asignacion array: recuperar valor");
 			UtGen.emitirRM("ST", UtGen.AC1, 0, UtGen.AC, "asignacion array: almacenar en posicion calculada");
 		} else {
 			// Asignación normal: var = valor
-			direccion = tablaSimbolos.getDireccion(n.getIdentificador());
-			UtGen.emitirRM("ST", UtGen.AC, direccion, UtGen.GP, "asignacion: almaceno el valor para el id "+n.getIdentificador());
+			AccesoVar av = resolverAccesoVariable(n.getIdentificador());
+			if(av.tipo == 0){ // global
+				UtGen.emitirRM("ST", UtGen.AC, av.offset, UtGen.GP, "asignacion: global " + n.getIdentificador());
+			} else {
+				UtGen.emitirRM("ST", UtGen.AC, av.offset, UtGen.FP, "asignacion: local/param " + n.getIdentificador());
+			}
 		}
 		
 		if(UtGen.debug)	UtGen.emitirComentario("<- asignacion");
@@ -562,8 +630,12 @@ public class Generador {
 		int direccion;
 		if(UtGen.debug)	UtGen.emitirComentario("-> leer");
 		UtGen.emitirRO("IN", UtGen.AC, 0, 0, "leer: lee un valor entero ");
-		direccion = tablaSimbolos.getDireccion(n.getIdentificador());
-		UtGen.emitirRM("ST", UtGen.AC, direccion, UtGen.GP, "leer: almaceno el valor entero leido en el id "+n.getIdentificador());
+		AccesoVar av = resolverAccesoVariable(n.getIdentificador());
+		if(av.tipo == 0){
+			UtGen.emitirRM("ST", UtGen.AC, av.offset, UtGen.GP, "leer: global " + n.getIdentificador());
+		} else {
+			UtGen.emitirRM("ST", UtGen.AC, av.offset, UtGen.FP, "leer: local/param " + n.getIdentificador());
+		}
 		if(UtGen.debug)	UtGen.emitirComentario("<- leer");
 	}
 	
@@ -590,40 +662,84 @@ public class Generador {
 	
 	private static void generarIdentificador(NodoBase nodo){
 		NodoIdentificador n = (NodoIdentificador)nodo;
-		int direccion;
 		if(UtGen.debug)	UtGen.emitirComentario("-> identificador");
 		
 		if(n.getDesplazamiento() != null){
 			// Acceso a array: arr[indice]
-			generar(n.getDesplazamiento());
-			direccion = tablaSimbolos.getDireccion(n.getNombre());
-			UtGen.emitirRM("LDC", UtGen.AC1, direccion, 0, "identificador array: cargar direccion base");
-			UtGen.emitirRO("ADD", UtGen.AC, UtGen.AC, UtGen.AC1, "identificador array: calcular direccion");
+			generar(n.getDesplazamiento()); // deja indice en AC
+			DireccionArray da = calcularBaseArray(n.getNombre());
+			if(da.esParametroArray){
+				UtGen.emitirRM("LD", UtGen.AC1, da.offsetFP, UtGen.FP, "id arr: cargar base param");
+				UtGen.emitirRO("ADD", UtGen.AC, UtGen.AC, UtGen.AC1, "id arr: base+idx");
+				UtGen.emitirRM("LD", UtGen.AC, 0, UtGen.AC, "id arr: load elemento");
+			} else if (da.esGlobal){
+				UtGen.emitirRM("LDC", UtGen.AC1, da.baseDireccion, 0, "id arr: base global");
+				UtGen.emitirRO("ADD", UtGen.AC, UtGen.AC, UtGen.AC1, "id arr: base+idx");
+				UtGen.emitirRM("LD", UtGen.AC, 0, UtGen.AC, "id arr: load elemento");
+			} else {
+				UtGen.emitirRM("LDA", UtGen.AC1, da.offsetFP, UtGen.FP, "id arr: base local");
+				UtGen.emitirRO("ADD", UtGen.AC, UtGen.AC, UtGen.AC1, "id arr: base+idx");
+				UtGen.emitirRM("LD", UtGen.AC, 0, UtGen.AC, "id arr: load elemento");
+			}
 		} else {
-			// Acceso normal a variable
-			direccion = tablaSimbolos.getDireccion(n.getNombre());
-			UtGen.emitirRM("LD", UtGen.AC, direccion, UtGen.GP, "cargar id: val["+n.getNombre()+"]");
+			AccesoVar av = resolverAccesoVariable(n.getNombre());
+			if(av.tipo == 0){
+				UtGen.emitirRM("LD", UtGen.AC, av.offset, UtGen.GP, "id: cargar global " + n.getNombre());
+			} else {
+				UtGen.emitirRM("LD", UtGen.AC, av.offset, UtGen.FP, "id: cargar local/param " + n.getNombre());
+			}
 		}
 		
 		if(UtGen.debug)	UtGen.emitirComentario("<- identificador");
 	}
 	
-	private static void generarOperacion(NodoBase nodo){
-		NodoOperacion n = (NodoOperacion) nodo;
-		if(UtGen.debug)	UtGen.emitirComentario("-> Operacion: " + n.getOperacion());
-		
-		// Manejar operador NOT (unario)
-		if(n.getOperacion() == tipoOp.not){
-			generar(n.getOpDerecho());
-			UtGen.emitirRM("JEQ", UtGen.AC, 2, UtGen.PC, "not: saltar si es cero (falso)");
-			UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "not: resultado falso");
-			UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "not: saltar carga de verdadero");
-			UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "not: resultado verdadero");
-			if(UtGen.debug)	UtGen.emitirComentario("<- Operacion: " + n.getOperacion());
-			return;
+	private static class AccesoVar {
+		// tipo 0: global (GP), tipo 1: FP relativo
+		int tipo; int offset;
+	}
+	private static AccesoVar resolverAccesoVariable(String nombre){
+		AccesoVar av = new AccesoVar();
+		// Si estamos dentro de una función y el nombre es local o parámetro, usar FP
+		if(funcionActual != null){
+			FunctionLayout fl = layoutsFuncion.get(funcionActual);
+			if(fl != null){
+				Integer off = fl.offsetLocales.get(nombre);
+				if(off != null){ av.tipo = 1; av.offset = off; return av; }
+				off = fl.offsetParametros.get(nombre);
+				if(off != null){ av.tipo = 1; av.offset = off; return av; }
+			}
 		}
-		
-		/* Genero la expresion izquierda de la operacion */
+		av.tipo = 0; av.offset = tablaSimbolos.getDireccion(nombre);
+		return av;
+	}
+	
+	private static class DireccionArray {
+		boolean esGlobal;
+		boolean esParametroArray;
+		int baseDireccion; // para globales
+		int offsetFP;      // para locales/param
+	}
+	private static DireccionArray calcularBaseArray(String nombre){
+		DireccionArray da = new DireccionArray();
+		if(funcionActual != null){
+			FunctionLayout fl = layoutsFuncion.get(funcionActual);
+			if(fl != null){
+				if(fl.parametrosArray.contains(nombre)){
+					da.esParametroArray = true; da.esGlobal = false; da.offsetFP = fl.offsetParametros.get(nombre);
+					return da;
+				}
+				Integer offLoc = fl.offsetLocales.get(nombre);
+				if(offLoc != null){ da.esGlobal = false; da.offsetFP = offLoc; return da; }
+			}
+		}
+		// Global
+		da.esGlobal = true; da.baseDireccion = tablaSimbolos.getDireccion(nombre);
+		return da;
+	}
+	
+	private static void generarOperacion(NodoBase nodo){
+		NodoOperacion n = (NodoOperacion)nodo;
+		if(UtGen.debug) UtGen.emitirComentario("-> Operacion: " + n.getOperacion());
 		if(n.getOpIzquierdo() != null){
 			generar(n.getOpIzquierdo());
 			/* Almaceno en la pseudo pila de valor temporales el valor de la operacion izquierda */
@@ -639,112 +755,107 @@ public class Generador {
 		}
 		
 		switch(n.getOperacion()){
-			case	mas:	UtGen.emitirRO("ADD", UtGen.AC, UtGen.AC1, UtGen.AC, "op: +");		
-							break;
-			case	menos:	UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: -");
-							break;
-			case	por:	UtGen.emitirRO("MUL", UtGen.AC, UtGen.AC1, UtGen.AC, "op: *");
-							break;
-			case	entre:	UtGen.emitirRO("DIV", UtGen.AC, UtGen.AC1, UtGen.AC, "op: /");
-							break;
-			case	modulo:	// a % b = a - (a/b)*b
-							UtGen.emitirRM("ST", UtGen.AC, desplazamientoTmp--, UtGen.MP, "mod: guardar b");
-							UtGen.emitirRM("ST", UtGen.AC1, desplazamientoTmp--, UtGen.MP, "mod: guardar a");
-							UtGen.emitirRO("DIV", UtGen.AC, UtGen.AC1, UtGen.AC, "mod: a/b");
-							UtGen.emitirRM("LD", UtGen.AC1, ++desplazamientoTmp, UtGen.MP, "mod: recuperar a");
-							UtGen.emitirRM("LD", 2, ++desplazamientoTmp, UtGen.MP, "mod: recuperar b en r2");
-							UtGen.emitirRO("MUL", UtGen.AC, UtGen.AC, 2, "mod: (a/b)*b");
-							UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "mod: a - (a/b)*b");
-							break;
-			case	potencia: {
-							// AC = exponente (derecha), AC1 = base (izquierda)
-							UtGen.emitirRM("ST", UtGen.AC, desplazamientoTmp--, UtGen.MP, "pow: guardar exp");
-							UtGen.emitirRM("ST", UtGen.AC1, desplazamientoTmp--, UtGen.MP, "pow: guardar base");
-							UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "pow: inicializar resultado = 1");
-							UtGen.emitirRM("ST", UtGen.AC, desplazamientoTmp--, UtGen.MP, "pow: guardar res");
-							int posRes = desplazamientoTmp + 1;
-							int posBase = desplazamientoTmp + 2;
-							int posExp = desplazamientoTmp + 3;
-							int loopStart = UtGen.emitirSalto(0);
-							UtGen.emitirComentario("pow: inicio bucle");
-							UtGen.emitirRM("LD", UtGen.AC, posExp, UtGen.MP, "pow: cargar exp");
-							int jmpEnd = UtGen.emitirSalto(1);
-							UtGen.emitirComentario("pow: salto condicional a fin (exp==0)");
-							// res = res * base
-							UtGen.emitirRM("LD", UtGen.AC, posRes, UtGen.MP, "pow: cargar res");
-							UtGen.emitirRM("LD", UtGen.AC1, posBase, UtGen.MP, "pow: cargar base");
-							UtGen.emitirRO("MUL", UtGen.AC, UtGen.AC1, UtGen.AC, "pow: res = res * base");
-							UtGen.emitirRM("ST", UtGen.AC, posRes, UtGen.MP, "pow: guardar res");
-							// exp = exp - 1
-							UtGen.emitirRM("LD", UtGen.AC1, posExp, UtGen.MP, "pow: cargar exp en AC1");
-							UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "pow: cargar 1");
-							UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "pow: exp - 1");
-							UtGen.emitirRM("ST", UtGen.AC, posExp, UtGen.MP, "pow: guardar exp");
-							UtGen.emitirRM_Abs("LDA", UtGen.PC, loopStart, "pow: repetir");
-							int loopEnd = UtGen.emitirSalto(0);
-							UtGen.cargarRespaldo(jmpEnd);
-							UtGen.emitirRM_Abs("JEQ", UtGen.AC, loopEnd, "pow: salir si exp == 0");
-							UtGen.restaurarRespaldo();
-							// resultado final en AC
-							UtGen.emitirRM("LD", UtGen.AC, posRes, UtGen.MP, "pow: cargar resultado");
-							// limpiar pila temporal (res, base, exp)
-							UtGen.emitirRM("LD", UtGen.AC1, ++desplazamientoTmp, UtGen.MP, "pow: pop res");
-							UtGen.emitirRM("LD", UtGen.AC1, ++desplazamientoTmp, UtGen.MP, "pow: pop base");
-							UtGen.emitirRM("LD", UtGen.AC1, ++desplazamientoTmp, UtGen.MP, "pow: pop exp");
-							break;
-						}
-			case	menor:	UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: <");
-							UtGen.emitirRM("JLT", UtGen.AC, 2, UtGen.PC, "voy dos instrucciones mas alla if verdadero (AC<0)");
-							UtGen.emitirRM("LDC", UtGen.AC, 0, UtGen.AC, "caso de falso (AC=0)");
-							UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "Salto incodicional a direccion: PC+1 (es falso evito colocarlo verdadero)");
-							UtGen.emitirRM("LDC", UtGen.AC, 1, UtGen.AC, "caso de verdadero (AC=1)");
-							break;
-			case	menorigual:	UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: <=");
-							UtGen.emitirRM("JLE", UtGen.AC, 2, UtGen.PC, "saltar si AC<=0");
-							UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "caso falso");
-							UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "saltar caso verdadero");
-							UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "caso verdadero");
-							break;
-			case	mayor:	UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: >");
-							UtGen.emitirRM("JGT", UtGen.AC, 2, UtGen.PC, "saltar si AC>0");
-							UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "caso falso");
-							UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "saltar caso verdadero");
-							UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "caso verdadero");
-							break;
-			case	mayorigual:	UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: >=");
-							UtGen.emitirRM("JGE", UtGen.AC, 2, UtGen.PC, "saltar si AC>=0");
-							UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "caso falso");
-							UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "saltar caso verdadero");
-							UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "caso verdadero");
-							break;
-			case	igual:	UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: ==");
-							UtGen.emitirRM("JEQ", UtGen.AC, 2, UtGen.PC, "voy dos instrucciones mas alla if verdadero (AC==0)");
-							UtGen.emitirRM("LDC", UtGen.AC, 0, UtGen.AC, "caso de falso (AC=0)");
-							UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "Salto incodicional a direccion: PC+1 (es falso evito colocarlo verdadero)");
-							UtGen.emitirRM("LDC", UtGen.AC, 1, UtGen.AC, "caso de verdadero (AC=1)");
-							break;
-			case	diferente:	UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: !=");
-							UtGen.emitirRM("JNE", UtGen.AC, 2, UtGen.PC, "saltar si AC!=0");
-							UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "caso falso");
-							UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "saltar caso verdadero");
-							UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "caso verdadero");
-							break;
-			case	and:	// Evaluación de cortocircuito
-							UtGen.emitirRM("JEQ", UtGen.AC1, 3, UtGen.PC, "and: si izquierdo es falso, resultado es falso");
-							UtGen.emitirRM("JEQ", UtGen.AC, 2, UtGen.PC, "and: si derecho es falso, resultado es falso");
-							UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "and: ambos verdaderos");
-							UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "and: saltar caso falso");
-							UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "and: resultado falso");
-							break;
-			case	or:		// Evaluación de cortocircuito
-							UtGen.emitirRM("JNE", UtGen.AC1, 3, UtGen.PC, "or: si izquierdo es verdadero, resultado es verdadero");
-							UtGen.emitirRM("JNE", UtGen.AC, 2, UtGen.PC, "or: si derecho es verdadero, resultado es verdadero");
-							UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "or: ambos falsos");
-							UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "or: saltar caso verdadero");
-							UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "or: resultado verdadero");
-							break;
+			case mas: UtGen.emitirRO("ADD", UtGen.AC, UtGen.AC1, UtGen.AC, "op: +"); break;
+			case menos: UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: -"); break;
+			case por: UtGen.emitirRO("MUL", UtGen.AC, UtGen.AC1, UtGen.AC, "op: *"); break;
+			case entre: UtGen.emitirRO("DIV", UtGen.AC, UtGen.AC1, UtGen.AC, "op: /"); break;
+			case modulo:
+				UtGen.emitirRM("ST", UtGen.AC, desplazamientoTmp--, UtGen.MP, "mod: guardar b");
+				UtGen.emitirRM("ST", UtGen.AC1, desplazamientoTmp--, UtGen.MP, "mod: guardar a");
+				UtGen.emitirRO("DIV", UtGen.AC, UtGen.AC1, UtGen.AC, "mod: a/b");
+				UtGen.emitirRM("LD", UtGen.AC1, ++desplazamientoTmp, UtGen.MP, "mod: recuperar a");
+				UtGen.emitirRM("LD", 2, ++desplazamientoTmp, UtGen.MP, "mod: recuperar b en r2");
+				UtGen.emitirRO("MUL", UtGen.AC, UtGen.AC, 2, "mod: (a/b)*b");
+				UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "mod: a - (a/b)*b");
+				break;
+			case potencia: {
+				UtGen.emitirRM("ST", UtGen.AC, desplazamientoTmp--, UtGen.MP, "pow: guardar exp");
+				UtGen.emitirRM("ST", UtGen.AC1, desplazamientoTmp--, UtGen.MP, "pow: guardar base");
+				UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "pow: inicializar resultado = 1");
+				UtGen.emitirRM("ST", UtGen.AC, desplazamientoTmp--, UtGen.MP, "pow: guardar res");
+				int posRes = desplazamientoTmp + 1;
+				int posBase = desplazamientoTmp + 2;
+				int posExp = desplazamientoTmp + 3;
+				int loopStart = UtGen.emitirSalto(0);
+				UtGen.emitirComentario("pow: inicio bucle");
+				UtGen.emitirRM("LD", UtGen.AC, posExp, UtGen.MP, "pow: cargar exp");
+				int jmpEnd = UtGen.emitirSalto(1);
+				UtGen.emitirComentario("pow: salto condicional a fin (exp==0)");
+				// res = res * base
+				UtGen.emitirRM("LD", UtGen.AC, posRes, UtGen.MP, "pow: cargar res");
+				UtGen.emitirRM("LD", UtGen.AC1, posBase, UtGen.MP, "pow: cargar base");
+				UtGen.emitirRO("MUL", UtGen.AC, UtGen.AC1, UtGen.AC, "pow: res = res * base");
+				UtGen.emitirRM("ST", UtGen.AC, posRes, UtGen.MP, "pow: guardar res");
+				// exp = exp - 1
+				UtGen.emitirRM("LD", UtGen.AC1, posExp, UtGen.MP, "pow: cargar exp en AC1");
+				UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "pow: cargar 1");
+				UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "pow: exp - 1");
+				UtGen.emitirRM("ST", UtGen.AC, posExp, UtGen.MP, "pow: guardar exp");
+				UtGen.emitirRM_Abs("LDA", UtGen.PC, loopStart, "pow: repetir");
+				int loopEnd = UtGen.emitirSalto(0);
+				UtGen.cargarRespaldo(jmpEnd);
+				UtGen.emitirRM_Abs("JEQ", UtGen.AC, loopEnd, "pow: salir si exp == 0");
+				UtGen.restaurarRespaldo();
+				// resultado final en AC
+				UtGen.emitirRM("LD", UtGen.AC, posRes, UtGen.MP, "pow: cargar resultado");
+				// limpiar pila temporal (res, base, exp)
+				UtGen.emitirRM("LD", UtGen.AC1, ++desplazamientoTmp, UtGen.MP, "pow: pop res");
+				UtGen.emitirRM("LD", UtGen.AC1, ++desplazamientoTmp, UtGen.MP, "pow: pop base");
+				UtGen.emitirRM("LD", UtGen.AC1, ++desplazamientoTmp, UtGen.MP, "pow: pop exp");
+				break;
+			}
+			case menor: UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: <");
+						UtGen.emitirRM("JLT", UtGen.AC, 2, UtGen.PC, "es verdadero (AC<0)");
+						UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "falso");
+						UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "salto a fin");
+						UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "verdadero");
+						break;
+			case mayor: UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: >");
+						UtGen.emitirRM("JGT", UtGen.AC, 2, UtGen.PC, "es verdadero (AC>0)");
+						UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "falso");
+						UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "salto a fin");
+						UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "verdadero");
+						break;
+			case menorigual: UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: <=");
+							  UtGen.emitirRM("JLE", UtGen.AC, 2, UtGen.PC, "es verdadero (AC<=0)");
+							  UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "falso");
+							  UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "salto a fin");
+							  UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "verdadero");
+							  break;
+			case mayorigual: UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: >=");
+							   UtGen.emitirRM("JGE", UtGen.AC, 2, UtGen.PC, "es verdadero (AC>=0)");
+							   UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "falso");
+							   UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "salto a fin");
+							   UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "verdadero");
+							   break;
+			case igual: UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: ==");
+						UtGen.emitirRM("JEQ", UtGen.AC, 2, UtGen.PC, "voy dos instrucciones mas alla if verdadero (AC==0)");
+						UtGen.emitirRM("LDC", UtGen.AC, 0, UtGen.AC, "caso de falso (AC=0)");
+						UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "Salto incodicional a direccion: PC+1 (es falso evito colocarlo verdadero)");
+						UtGen.emitirRM("LDC", UtGen.AC, 1, UtGen.AC, "caso de verdadero (AC=1)");
+						break;
+			case diferente: UtGen.emitirRO("SUB", UtGen.AC, UtGen.AC1, UtGen.AC, "op: !=");
+						  UtGen.emitirRM("JNE", UtGen.AC, 2, UtGen.PC, "saltar si AC!=0");
+						  UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "caso falso");
+						  UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "saltar caso verdadero");
+						  UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "caso verdadero");
+						  break;
+			case and:
+				UtGen.emitirRM("JEQ", UtGen.AC1, 3, UtGen.PC, "and: si izquierdo es falso, resultado es falso");
+				UtGen.emitirRM("JEQ", UtGen.AC, 2, UtGen.PC, "and: si derecho es falso, resultado es falso");
+				UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "and: ambos verdaderos");
+				UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "and: saltar caso falso");
+				UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "and: resultado falso");
+				break;
+			case or:
+				UtGen.emitirRM("JNE", UtGen.AC1, 3, UtGen.PC, "or: si izquierdo es verdadero, resultado es verdadero");
+				UtGen.emitirRM("JNE", UtGen.AC, 2, UtGen.PC, "or: si derecho es verdadero, resultado es verdadero");
+				UtGen.emitirRM("LDC", UtGen.AC, 0, 0, "or: ambos falsos");
+				UtGen.emitirRM("LDA", UtGen.PC, 1, UtGen.PC, "or: saltar caso verdadero");
+				UtGen.emitirRM("LDC", UtGen.AC, 1, 0, "or: resultado verdadero");
+				break;
 			default:
-							UtGen.emitirComentario("BUG: tipo de operacion desconocida: " + n.getOperacion());
+				UtGen.emitirComentario("BUG: tipo de operacion desconocida: " + n.getOperacion());
 		}
 		if(UtGen.debug)	UtGen.emitirComentario("<- Operacion: " + n.getOperacion());
 	}
@@ -754,7 +865,47 @@ public class Generador {
 		UtGen.emitirComentario("* Prefacio estandar");
 		// Inicializar punteros
 		UtGen.emitirRM("LDC", UtGen.GP, 0, 0, "init: GP = 0");
-		UtGen.emitirRM("LDC", UtGen.MP, 1023, 0, "init: MP = 1023 (tope de memoria)");
+		UtGen.emitirRM("LDC", UtGen.MP, 1023, 0, "init: MP = 1023 (tope de memoria temporales)");
+		// Reservar zona de pila de activacion (separada de MP)
+		UtGen.emitirRM("LDC", UtGen.SP, 512, 0, "init: SP = 512 (pila activacion)");
+		UtGen.emitirRM("LDA", UtGen.FP, 0, UtGen.SP, "init: FP = SP");
 		UtGen.emitirComentario("* Fin del prefacio estandar");
+	}
+
+	// Emision de funciones en el orden declarado
+	private static void emitirFuncionesEnOrden(NodoBase funciones){
+		NodoBase p = funciones;
+		while(p != null){
+			if(p instanceof NodoFuncion){
+				emitirFuncion((NodoFuncion)p);
+			}
+			p = p.getHermanoDerecha();
+		}
+	}
+	
+	// Emite una función si no ha sido emitida
+	private static void emitirFuncion(NodoFuncion def){
+		String nombre = def.getNombre();
+		if (funcionesEmitidas.contains(nombre)) return;
+		int inicio = UtGen.emitirSalto(0);
+		inicioFuncion.put(nombre, inicio);
+		funcionesEmitidas.add(nombre);
+		UtGen.emitirComentario("=== INICIO FUNCION " + nombre + " ===");
+		// Reservar locales
+		FunctionLayout nfl = layoutsFuncion.get(nombre);
+		int k = (nfl != null) ? nfl.slotsLocales : 0;
+		if(k > 0){
+			UtGen.emitirRM("LDA", UtGen.SP, -k, UtGen.SP, "prologo: reservar locales");
+		}
+		// Generar cuerpo
+		String funcGuardada = funcionActual;
+		funcionActual = nombre;
+		if (def.getCuerpo() != null) {
+			generar(def.getCuerpo());
+		}
+		funcionActual = funcGuardada;
+		// Epilogo implicito
+		emitirEpilogoFuncion(nombre);
+		UtGen.emitirComentario("=== FIN FUNCION " + nombre + " ===");
 	}
 }

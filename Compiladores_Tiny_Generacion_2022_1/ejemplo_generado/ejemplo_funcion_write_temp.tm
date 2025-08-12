@@ -34,22 +34,16 @@
 14:     ST        4,0(3)        call: push DL (FP)
 15:     LDA       3,-1(3)       call: sp--
 16:     LDA       4,1(3)        call: FP=SP+1
-17:     LDA       7,-1(7)       call: salto a funcion duplicar
+17:     LDA       7,0(7)        call: salto a funcion duplicar
 * <- llamada funcion
 18:     ST        0,4(5)        asignacion: global resultado
 * <- asignacion
 * -> escribir
 * -> identificador
-19:     LD        0,4(5)        id: cargar global resultado
+19:     LD        0,0(5)        id: cargar global x
 * <- identificador
 20:     OUT       0,0,0         escribir: genero la salida de la expresion
 * <- escribir
-* -> escribir
-* -> identificador
-21:     LD        0,0(5)        id: cargar global x
-* <- identificador
-22:     OUT       0,0,0         escribir: genero la salida de la expresion
-* <- escribir
 * <- programa
 * Fin de la ejecucion.
-23:     HALT      0,0,0         
+21:     HALT      0,0,0         

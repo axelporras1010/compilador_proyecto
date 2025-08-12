@@ -444,7 +444,9 @@ public class Generador {
 		}
 		
 		// 2) Apilar direccion de retorno y enlace dinamico
-		UtGen.emitirRM("LDA", UtGen.AC, 3, UtGen.PC, "call: calcular return addr (PC+3)");
+		// Nota: hay 5 instrucciones entre este punto y el salto LDA PC a la función,
+		// por lo que el retorno correcto es PC+6
+		UtGen.emitirRM("LDA", UtGen.AC, 6, UtGen.PC, "call: calcular return addr (PC+6)");
 		UtGen.emitirRM("ST", UtGen.AC, 0, UtGen.SP, "call: push RA");
 		UtGen.emitirRM("LDA", UtGen.SP, -1, UtGen.SP, "call: sp--");
 		UtGen.emitirRM("ST", UtGen.FP, 0, UtGen.SP, "call: push DL (FP)");

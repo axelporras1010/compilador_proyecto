@@ -28,7 +28,7 @@
 * <- identificador
 9:      ST        0,0(3)        call: push arg
 10:     LDA       3,-1(3)       call: sp--
-11:     LDA       0,3(7)        call: calcular return addr (PC+3)
+11:     LDA       0,6(7)        call: calcular return addr (PC+6)
 12:     ST        0,0(3)        call: push RA
 13:     LDA       3,-1(3)       call: sp--
 14:     ST        4,0(3)        call: push DL (FP)

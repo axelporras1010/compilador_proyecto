@@ -165,6 +165,8 @@ public class Generador {
 		// Registrar funciones (sin generar su cuerpo)
 		if(n.getFunction_block() != null){
 			generar(n.getFunction_block());
+			// Emitir todas las funciones ahora, en el orden declarado
+			emitirFuncionesEnOrden(n.getFunction_block());
 		}
 		
 		// Generar programa principal
@@ -404,19 +406,14 @@ public class Generador {
 		// Preparar datos de la función
 		NodoFuncion defFuncion = funcionesRegistradas.get(n.getNombreFuncion());
 		FunctionLayout fl = layoutsFuncion.get(n.getNombreFuncion());
-		int numArgsEsperados = (fl != null) ? fl.numParametros : 0;
-		
-		// 1) Procesar y apilar argumentos (de izquierda a derecha)
 		int numArgs = 0;
 		java.util.List<NodoBase> args = new java.util.ArrayList<>();
 		NodoBase argNode = n.getArgumentos();
 		while(argNode != null){ args.add(argNode); argNode = argNode.getHermanoDerecha(); }
 		for(int idx=0; idx<args.size(); idx++){
 			NodoBase arg = args.get(idx);
-			// Si el parametro esperado es array, pasar la base (direccion)
 			boolean pasarBaseArray = false;
-			if (fl != null && defFuncion != null){
-				// recuperar el nodo del parametro correspondiente (en la misma posicion)
+			if (defFuncion != null){
 				NodoBase p = defFuncion.getParametros();
 				for(int k=0; k<idx && p!=null; k++) p = p.getHermanoDerecha();
 				if(p instanceof NodoDeclaracion){
@@ -424,73 +421,42 @@ public class Generador {
 				}
 			}
 			if(pasarBaseArray && arg instanceof NodoIdentificador){
-				// Empujar direccion base del arreglo segun sea global/param/local
 				DireccionArray da = calcularBaseArray(((NodoIdentificador)arg).getNombre());
 				if(da.esGlobal){
 					UtGen.emitirRM("LDC", UtGen.AC, da.baseDireccion, 0, "arg array: base global");
-					// AC = dir + GP
 					UtGen.emitirRO("ADD", UtGen.AC, UtGen.AC, UtGen.GP, "arg array: base absoluta");
 				} else {
-					// AC = FP + offset
 					UtGen.emitirRM("LDA", UtGen.AC, da.offsetFP, UtGen.FP, "arg array: base local/param");
 				}
 			} else {
 				generar(arg);
 			}
-			// push
 			UtGen.emitirRM("ST", UtGen.AC, 0, UtGen.SP, "call: push arg");
 			UtGen.emitirRM("LDA", UtGen.SP, -1, UtGen.SP, "call: sp--");
 			numArgs++;
 		}
 		
-		// 2) Apilar direccion de retorno y enlace dinamico
-		// Nota: hay 5 instrucciones entre este punto y el salto LDA PC a la función,
-		// y debemos regresar a la instrucción SIGUIENTE al salto, por lo que es PC+7
+		// RA y DL
 		UtGen.emitirRM("LDA", UtGen.AC, 7, UtGen.PC, "call: calcular return addr (PC+7)");
 		UtGen.emitirRM("ST", UtGen.AC, 0, UtGen.SP, "call: push RA");
 		UtGen.emitirRM("LDA", UtGen.SP, -1, UtGen.SP, "call: sp--");
 		UtGen.emitirRM("ST", UtGen.FP, 0, UtGen.SP, "call: push DL (FP)");
 		UtGen.emitirRM("LDA", UtGen.SP, -1, UtGen.SP, "call: sp--");
-		// FP = SP + 1 (apunta al enlace dinamico)
 		UtGen.emitirRM("LDA", UtGen.FP, 1, UtGen.SP, "call: FP=SP+1");
 		
-		// Compilación diferida: emitir función si es la primera vez
+		// Asegurar que la funcion fue emitida y tenemos su inicio
 		Integer inicio = inicioFuncion.get(n.getNombreFuncion());
-		if (inicio == null) {
-			int posLlamada = UtGen.emitirSalto(2);
-			UtGen.restaurarRespaldo();
-			inicio = UtGen.emitirSalto(0);
-			inicioFuncion.put(n.getNombreFuncion(), inicio);
-			funcionesEmitidas.add(n.getNombreFuncion());
-			// Emitir prólogo de función: reservar espacio para locales
-			UtGen.emitirComentario("=== INICIO FUNCION " + n.getNombreFuncion() + " ===");
-			FunctionLayout nfl = layoutsFuncion.get(n.getNombreFuncion());
-			int k = (nfl != null) ? nfl.slotsLocales : 0;
-			if(k > 0){
-				UtGen.emitirRM("LDA", UtGen.SP, -k, UtGen.SP, "prologo: reservar locales");
-			}
-			// Generar cuerpo
-			NodoFuncion def = funcionesRegistradas.get(n.getNombreFuncion());
-			String funcGuardada = funcionActual;
-			funcionActual = n.getNombreFuncion();
-			if (def != null && def.getCuerpo() != null) {
-				generar(def.getCuerpo());
-			}
-			funcionActual = funcGuardada;
-			// Return implícito
-			emitirEpilogoFuncion(n.getNombreFuncion());
-			UtGen.emitirComentario("=== FIN FUNCION " + n.getNombreFuncion() + " ===");
-			// Parchar llamada
-			UtGen.cargarRespaldo(posLlamada);
-			UtGen.emitirRM_Abs("LDA", UtGen.PC, inicio, "call: salto a funcion " + n.getNombreFuncion());
-			// Completar la segunda ranura de salto (NOP via LDA PC,0)
-			UtGen.emitirRM("LDA", UtGen.PC, 0, UtGen.PC, "call: nop de relleno");
-			UtGen.restaurarRespaldo();
+		if (inicio == null && defFuncion != null){
+			// Emite ahora la función si por algun motivo no fue emitida en programa
+			emitirFuncion(defFuncion);
+			inicio = inicioFuncion.get(n.getNombreFuncion());
+		}
+		if (inicio == null){
+			UtGen.emitirComentario("ERROR: llamada a funcion sin inicio: " + n.getNombreFuncion());
 		} else {
 			UtGen.emitirRM_Abs("LDA", UtGen.PC, inicio, "call: salto a funcion " + n.getNombreFuncion());
 		}
 		
-		// El callee limpia su propio frame (incluye parametros), no hay nada que hacer
 		if(UtGen.debug) UtGen.emitirComentario("<- llamada funcion");
 	}
 	
@@ -904,5 +870,42 @@ public class Generador {
 		UtGen.emitirRM("LDC", UtGen.SP, 512, 0, "init: SP = 512 (pila activacion)");
 		UtGen.emitirRM("LDA", UtGen.FP, 0, UtGen.SP, "init: FP = SP");
 		UtGen.emitirComentario("* Fin del prefacio estandar");
+	}
+
+	// Emision de funciones en el orden declarado
+	private static void emitirFuncionesEnOrden(NodoBase funciones){
+		NodoBase p = funciones;
+		while(p != null){
+			if(p instanceof NodoFuncion){
+				emitirFuncion((NodoFuncion)p);
+			}
+			p = p.getHermanoDerecha();
+		}
+	}
+	
+	// Emite una función si no ha sido emitida
+	private static void emitirFuncion(NodoFuncion def){
+		String nombre = def.getNombre();
+		if (funcionesEmitidas.contains(nombre)) return;
+		int inicio = UtGen.emitirSalto(0);
+		inicioFuncion.put(nombre, inicio);
+		funcionesEmitidas.add(nombre);
+		UtGen.emitirComentario("=== INICIO FUNCION " + nombre + " ===");
+		// Reservar locales
+		FunctionLayout nfl = layoutsFuncion.get(nombre);
+		int k = (nfl != null) ? nfl.slotsLocales : 0;
+		if(k > 0){
+			UtGen.emitirRM("LDA", UtGen.SP, -k, UtGen.SP, "prologo: reservar locales");
+		}
+		// Generar cuerpo
+		String funcGuardada = funcionActual;
+		funcionActual = nombre;
+		if (def.getCuerpo() != null) {
+			generar(def.getCuerpo());
+		}
+		funcionActual = funcGuardada;
+		// Epilogo implicito
+		emitirEpilogoFuncion(nombre);
+		UtGen.emitirComentario("=== FIN FUNCION " + nombre + " ===");
 	}
 }
